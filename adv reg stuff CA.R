@@ -544,7 +544,7 @@ legend(
 
 
 # ============================================================
-# PROBLEM SET 3 : KNN SMOOTHER
+# PROBLEM SET 3 : KNN SMOOTHER USING knnreg()
 # ============================================================
 
 
@@ -566,6 +566,13 @@ reg <- function(x) {
 
 
 # ------------------------------------------------------------
+# Load caret package
+# ------------------------------------------------------------
+
+library(caret)
+
+
+# ------------------------------------------------------------
 # 2 & 3. Training and Test Data
 # ------------------------------------------------------------
 
@@ -574,6 +581,19 @@ X.test  <- X[81:100]
 
 Y.train <- Y[1:80]
 Y.test  <- Y[81:100]
+
+
+# Create training and test data frames
+
+train.data <- data.frame(
+  X = X.train,
+  Y = Y.train
+)
+
+test.data <- data.frame(
+  X = X.test,
+  Y = Y.test
+)
 
 
 # ------------------------------------------------------------
@@ -605,40 +625,28 @@ legend("topright",
 
 
 # ------------------------------------------------------------
-# 6. KNN Smoother Function
+# 6. KNN Smoother using knnreg()
 # ------------------------------------------------------------
-
-knn.smoother <- function(x.train, y.train, x.new, k) {
-  
-  result <- numeric(length(x.new))
-  
-  for (i in 1:length(x.new)) {
-    
-    distance <- abs(x.train - x.new[i])
-    
-    nearest <- order(distance)[1:k]
-    
-    result[i] <- mean(y.train[nearest])
-  }
-  
-  return(result)
-}
-
-
-# Values of k
 
 k.values <- c(1, 2, 5, 10, 20, 40, 80)
 
 
-# ------------------------------------------------------------
 # Plot KNN estimates for different k
-# ------------------------------------------------------------
 
 par(mfrow = c(2, 4))
 
 for (k in k.values) {
   
-  y.hat <- knn.smoother(X.train, Y.train, x.grid, k)
+  model <- knnreg(
+    Y ~ X,
+    data = train.data,
+    k = k
+  )
+  
+  y.hat <- predict(
+    model,
+    data.frame(X = x.grid)
+  )
   
   plot(X.train, Y.train,
        pch = 16,
@@ -647,10 +655,12 @@ for (k in k.values) {
        xlab = "X",
        ylab = "Y")
   
-  lines(x.grid, y.hat,
+  lines(x.grid,
+        y.hat,
         lwd = 2)
   
-  lines(x.grid, reg(x.grid),
+  lines(x.grid,
+        reg(x.grid),
         lty = 2,
         lwd = 2)
 }
@@ -663,31 +673,55 @@ par(mfrow = c(1, 1))
 # ------------------------------------------------------------
 
 train.error <- numeric(length(k.values))
+
 test.error <- numeric(length(k.values))
+
 
 for (i in 1:length(k.values)) {
   
   k <- k.values[i]
   
-  train.pred <- knn.smoother(
-    X.train,
-    Y.train,
-    X.train,
-    k
+  # Fit KNN model
+  
+  model <- knnreg(
+    Y ~ X,
+    data = train.data,
+    k = k
   )
   
-  test.pred <- knn.smoother(
-    X.train,
-    Y.train,
-    X.test,
-    k
+  
+  # Training predictions
+  
+  train.pred <- predict(
+    model,
+    train.data
   )
   
-  train.error[i] <- mean((Y.train - train.pred)^2)
   
-  test.error[i] <- mean((Y.test - test.pred)^2)
+  # Test predictions
+  
+  test.pred <- predict(
+    model,
+    test.data
+  )
+  
+  
+  # Training error
+  
+  train.error[i] <- mean(
+    (Y.train - train.pred)^2
+  )
+  
+  
+  # Test error
+  
+  test.error[i] <- mean(
+    (Y.test - test.pred)^2
+  )
 }
 
+
+# Create results table
 
 results <- data.frame(
   k = k.values,
@@ -698,16 +732,18 @@ results <- data.frame(
 print(results)
 
 
-# Plot errors
+# Plot training and test errors
 
-plot(k.values, train.error,
+plot(k.values,
+     train.error,
      type = "b",
      pch = 16,
      xlab = "k",
      ylab = "MSE",
      main = "Training and Test Errors")
 
-lines(k.values, test.error,
+lines(k.values,
+      test.error,
       type = "b",
       pch = 17)
 
@@ -718,60 +754,7 @@ legend("topright",
 
 
 # ------------------------------------------------------------
-# 8. Compare with caret::knnreg
-# ------------------------------------------------------------
-
-library(caret)
-
-# Make a data frame for training
-train.data <- data.frame(
-  X = X.train,
-  Y = Y.train
-)
-
-# Make a data frame for testing
-test.data <- data.frame(
-  X = X.test,
-  Y = Y.test
-)
-
-caret.results <- data.frame(
-  k = k.values,
-  Training_Error = NA,
-  Test_Error = NA
-)
-
-for (i in 1:length(k.values)) {
-  
-  k <- k.values[i]
-  
-  # Fit KNN model
-  model <- knnreg(
-    Y ~ X,
-    data = train.data,
-    k = k
-  )
-  
-  # Training prediction
-  train.pred <- predict(model, train.data)
-  
-  # Test prediction
-  test.pred <- predict(model, test.data)
-  
-  # Errors
-  caret.results$Training_Error[i] <-
-    mean((Y.train - train.pred)^2)
-  
-  caret.results$Test_Error[i] <-
-    mean((Y.test - test.pred)^2)
-}
-
-print(caret.results)
-
-
-
-# ------------------------------------------------------------
-# 9. Repeat 50 times
+# 8. Repeat 50 times
 # ------------------------------------------------------------
 
 set.seed(1234)
@@ -792,38 +775,84 @@ test.error.50 <- matrix(
 for (r in 1:50) {
   
   # Randomly select 80 observations
-  train.id <- sample(1:100, 80)
+  
+  train.id <- sample(
+    1:100,
+    80
+  )
   
   # Remaining 20 observations
-  test.id <- setdiff(1:100, train.id)
+  
+  test.id <- setdiff(
+    1:100,
+    train.id
+  )
+  
+  
+  # Training data
   
   X.train <- X[train.id]
   Y.train <- Y[train.id]
+  
+  
+  # Test data
   
   X.test <- X[test.id]
   Y.test <- Y[test.id]
   
   
+  # Create data frames
+  
+  train.data <- data.frame(
+    X = X.train,
+    Y = Y.train
+  )
+  
+  test.data <- data.frame(
+    X = X.test,
+    Y = Y.test
+  )
+  
+  
+  # Try each k
+  
   for (i in 1:length(k.values)) {
     
     k <- k.values[i]
     
-    train.pred <- knn.smoother(
-      X.train,
-      Y.train,
-      X.train,
-      k
+    
+    # Fit KNN model
+    
+    model <- knnreg(
+      Y ~ X,
+      data = train.data,
+      k = k
     )
     
-    test.pred <- knn.smoother(
-      X.train,
-      Y.train,
-      X.test,
-      k
+    
+    # Training predictions
+    
+    train.pred <- predict(
+      model,
+      train.data
     )
+    
+    
+    # Test predictions
+    
+    test.pred <- predict(
+      model,
+      test.data
+    )
+    
+    
+    # Training error
     
     train.error.50[r, i] <-
       mean((Y.train - train.pred)^2)
+    
+    
+    # Test error
     
     test.error.50[r, i] <-
       mean((Y.test - test.pred)^2)
@@ -831,11 +860,17 @@ for (r in 1:50) {
 }
 
 
-# Average errors
+# ------------------------------------------------------------
+# Average errors over 50 repetitions
+# ------------------------------------------------------------
 
-average.train.error <- colMeans(train.error.50)
+average.train.error <- colMeans(
+  train.error.50
+)
 
-average.test.error <- colMeans(test.error.50)
+average.test.error <- colMeans(
+  test.error.50
+)
 
 
 average.results <- data.frame(
@@ -869,7 +904,7 @@ legend("topright",
 
 
 # ------------------------------------------------------------
-# 10. Boston Dataset
+# 9. Boston Dataset
 # ------------------------------------------------------------
 
 library(MASS)
@@ -877,6 +912,7 @@ library(MASS)
 data(Boston)
 
 X <- Boston$lstat
+
 Y <- Boston$medv
 
 
@@ -909,27 +945,70 @@ cv.error <- matrix(
 
 for (fold in 1:22) {
   
-  train.id <- which(folds != fold)
+  # Training observations
   
-  test.id <- which(folds == fold)
+  train.id <- which(
+    folds != fold
+  )
+  
+  
+  # Test observations
+  
+  test.id <- which(
+    folds == fold
+  )
+  
+  
+  # Training data
   
   X.train <- X[train.id]
   Y.train <- Y[train.id]
+  
+  
+  # Test data
   
   X.test <- X[test.id]
   Y.test <- Y[test.id]
   
   
+  # Create data frames
+  
+  train.data <- data.frame(
+    X = X.train,
+    Y = Y.train
+  )
+  
+  test.data <- data.frame(
+    X = X.test,
+    Y = Y.test
+  )
+  
+  
+  # Try each k
+  
   for (i in 1:length(k.values)) {
     
     k <- k.values[i]
     
-    prediction <- knn.smoother(
-      X.train,
-      Y.train,
-      X.test,
-      k
+    
+    # Fit KNN model
+    
+    model <- knnreg(
+      Y ~ X,
+      data = train.data,
+      k = k
     )
+    
+    
+    # Prediction
+    
+    prediction <- predict(
+      model,
+      test.data
+    )
+    
+    
+    # CV error
     
     cv.error[fold, i] <-
       mean((Y.test - prediction)^2)
@@ -937,9 +1016,13 @@ for (fold in 1:22) {
 }
 
 
-# Average CV error
+# ------------------------------------------------------------
+# Average CV Error
+# ------------------------------------------------------------
 
-average.cv.error <- colMeans(cv.error)
+average.cv.error <- colMeans(
+  cv.error
+)
 
 
 Boston.results <- data.frame(
@@ -958,10 +1041,16 @@ best.k <- k.values[
   which.min(average.cv.error)
 ]
 
-cat("Best k =", best.k, "\n")
+cat(
+  "Best k =",
+  best.k,
+  "\n"
+)
 
 
+# ------------------------------------------------------------
 # Plot CV errors
+# ------------------------------------------------------------
 
 plot(k.values,
      average.cv.error,
@@ -970,7 +1059,6 @@ plot(k.values,
      xlab = "k",
      ylab = "CV Error",
      main = "22-Fold Cross-Validation")
-
 
 
 
@@ -1039,206 +1127,110 @@ legend("topright",
        col = c("blue", "red", "black"))
 
 
+
 # ============================================================
-# 6. KERNEL SMOOTHER
+# PROBLEM SET 4 : KERNEL SMOOTHER
+# Using built-in ksmooth()
 # ============================================================
 
 
 # ------------------------------------------------------------
-# Kernel Functions
+# 1. Generate the simulated data
 # ------------------------------------------------------------
 
-# Gaussian Kernel
+set.seed(1234)
 
-gaussian <- function(u) {
-  exp(-u^2 / 2)
-}
+X <- runif(100, 5, 15)
 
+Y <- 5*sin(X) + 23*cos(X)^2 + rnorm(100, 0, 5)
 
-# Uniform Kernel
-
-uniform <- function(u) {
-  ifelse(abs(u) <= 1, 1, 0)
-}
+Sim.1 <- data.frame(
+  X = X,
+  Y = Y
+)
 
 
-# Triangular Kernel
+# True regression function
 
-triangular <- function(u) {
-  ifelse(abs(u) <= 1, 1 - abs(u), 0)
-}
-
-
-# Epanechnikov Kernel
-
-epanechnikov <- function(u) {
-  ifelse(abs(u) <= 1, 0.75 * (1 - u^2), 0)
+reg <- function(x) {
+  5*sin(x) + 23*cos(x)^2
 }
 
 
 # ------------------------------------------------------------
-# General Kernel Smoother
+# 2 & 3. Training and Test Data
 # ------------------------------------------------------------
 
-kernel.smoother <- function(x.train, y.train, x.new, h, kernel) {
-  
-  result <- numeric(length(x.new))
-  
-  for (i in 1:length(x.new)) {
-    
-    u <- (x.new[i] - x.train) / h
-    
-    weights <- kernel(u)
-    
-    result[i] <- sum(weights * y.train) / sum(weights)
-  }
-  
-  return(result)
-}
+X.train <- X[1:80]
+X.test <- X[81:100]
+
+Y.train <- Y[1:80]
+Y.test <- Y[81:100]
 
 
 # ------------------------------------------------------------
-# Bandwidth values
+# 4 & 5. Plot Data and Regression Function
+# ------------------------------------------------------------
+
+x.grid <- seq(5, 15, length.out = 200)
+
+plot(X.train, Y.train,
+     pch = 16,
+     col = "blue",
+     xlab = "X",
+     ylab = "Y",
+     main = "Training, Test Data and Regression Function")
+
+points(X.test, Y.test,
+       pch = 17,
+       col = "red")
+
+lines(x.grid,
+      reg(x.grid),
+      lwd = 2)
+
+legend("topright",
+       legend = c("Training", "Test", "Regression"),
+       pch = c(16, 17, NA),
+       lty = c(NA, NA, 1),
+       col = c("blue", "red", "black"))
+
+
+# ------------------------------------------------------------
+# 6. Gaussian Kernel Smoother using ksmooth()
 # ------------------------------------------------------------
 
 h.values <- c(0.1, 0.25, 0.5, 1, 2)
 
-x.grid <- seq(
-  min(X.train),
-  max(X.train),
-  length.out = 200
-)
-
-
-# ============================================================
-# (a) GAUSSIAN KERNEL
-# ============================================================
 
 par(mfrow = c(2, 3))
 
 for (h in h.values) {
   
-  y.hat <- kernel.smoother(
+  model <- ksmooth(
     X.train,
     Y.train,
-    x.grid,
-    h,
-    gaussian
+    kernel = "normal",
+    bandwidth = h,
+    x.points = x.grid
   )
+  
   
   plot(X.train, Y.train,
        pch = 16,
        col = "grey",
-       main = paste("Gaussian, h =", h),
+       main = paste("Gaussian Kernel, h =", h),
        xlab = "X",
        ylab = "Y")
   
-  lines(x.grid, y.hat,
+  
+  lines(model$x,
+        model$y,
         lwd = 2)
   
-  lines(x.grid, reg(x.grid),
-        lty = 2,
-        lwd = 2)
-}
-
-par(mfrow = c(1, 1))
-
-
-# ============================================================
-# (b) UNIFORM KERNEL
-# ============================================================
-
-par(mfrow = c(2, 3))
-
-for (h in h.values) {
   
-  y.hat <- kernel.smoother(
-    X.train,
-    Y.train,
-    x.grid,
-    h,
-    uniform
-  )
-  
-  plot(X.train, Y.train,
-       pch = 16,
-       col = "grey",
-       main = paste("Uniform, h =", h),
-       xlab = "X",
-       ylab = "Y")
-  
-  lines(x.grid, y.hat,
-        lwd = 2)
-  
-  lines(x.grid, reg(x.grid),
-        lty = 2,
-        lwd = 2)
-}
-
-par(mfrow = c(1, 1))
-
-
-# ============================================================
-# (c) TRIANGULAR KERNEL
-# ============================================================
-
-par(mfrow = c(2, 3))
-
-for (h in h.values) {
-  
-  y.hat <- kernel.smoother(
-    X.train,
-    Y.train,
-    x.grid,
-    h,
-    triangular
-  )
-  
-  plot(X.train, Y.train,
-       pch = 16,
-       col = "grey",
-       main = paste("Triangular, h =", h),
-       xlab = "X",
-       ylab = "Y")
-  
-  lines(x.grid, y.hat,
-        lwd = 2)
-  
-  lines(x.grid, reg(x.grid),
-        lty = 2,
-        lwd = 2)
-}
-
-par(mfrow = c(1, 1))
-
-
-# ============================================================
-# (d) EPANECHNIKOV KERNEL
-# ============================================================
-
-par(mfrow = c(2, 3))
-
-for (h in h.values) {
-  
-  y.hat <- kernel.smoother(
-    X.train,
-    Y.train,
-    x.grid,
-    h,
-    epanechnikov
-  )
-  
-  plot(X.train, Y.train,
-       pch = 16,
-       col = "grey",
-       main = paste("Epanechnikov, h =", h),
-       xlab = "X",
-       ylab = "Y")
-  
-  lines(x.grid, y.hat,
-        lwd = 2)
-  
-  lines(x.grid, reg(x.grid),
+  lines(x.grid,
+        reg(x.grid),
         lty = 2,
         lwd = 2)
 }
@@ -1247,18 +1239,20 @@ par(mfrow = c(1, 1))
 
 
 # ------------------------------------------------------------
-# Comment on the plots
+# Interpretation of bandwidth
 # ------------------------------------------------------------
 
 # Small h:
-# The estimate is more wiggly and follows the data closely.
+# The curve follows the observations closely
+# and may become wiggly.
 #
 # Large h:
-# The estimate becomes smoother.
+# The curve becomes smoother.
 #
-# Therefore, increasing h increases smoothing.
 # Very small h can overfit.
 # Very large h can underfit.
+#
+# Therefore, bandwidth controls the amount of smoothing.
 
 
 # ============================================================
@@ -1266,100 +1260,12 @@ par(mfrow = c(1, 1))
 # ============================================================
 
 
-# Store errors
-# Rows = bandwidths
-# Columns = kernels
-
-training.error <- matrix(
-  0,
-  nrow = length(h.values),
-  ncol = 4
+training.error <- numeric(
+  length(h.values)
 )
 
-test.error <- matrix(
-  0,
-  nrow = length(h.values),
-  ncol = 4
-)
-
-
-# List of kernels
-
-kernels <- list(
-  Gaussian = gaussian,
-  Uniform = uniform,
-  Triangular = triangular,
-  Epanechnikov = epanechnikov
-)
-
-
-# Calculate errors
-
-for (j in 1:4) {
-  
-  for (i in 1:length(h.values)) {
-    
-    h <- h.values[i]
-    
-    train.pred <- kernel.smoother(
-      X.train,
-      Y.train,
-      X.train,
-      h,
-      kernels[[j]]
-    )
-    
-    test.pred <- kernel.smoother(
-      X.train,
-      Y.train,
-      X.test,
-      h,
-      kernels[[j]]
-    )
-    
-    training.error[i, j] <-
-      mean((Y.train - train.pred)^2)
-    
-    test.error[i, j] <-
-      mean((Y.test - test.pred)^2)
-  }
-}
-
-
-# Give names to columns
-
-colnames(training.error) <- names(kernels)
-
-colnames(test.error) <- names(kernels)
-
-
-# Display results
-
-training.results <- data.frame(
-  h = h.values,
-  training.error
-)
-
-test.results <- data.frame(
-  h = h.values,
-  test.error
-)
-
-print(training.results)
-
-print(test.results)
-
-
-# ============================================================
-# 8. Compare Gaussian Kernel with ksmooth()
-# ============================================================
-
-# ksmooth() uses Gaussian kernel when kernel = "normal"
-
-ksmooth.results <- data.frame(
-  h = h.values,
-  Training_Error = NA,
-  Test_Error = NA
+test.error <- numeric(
+  length(h.values)
 )
 
 
@@ -1367,9 +1273,10 @@ for (i in 1:length(h.values)) {
   
   h <- h.values[i]
   
+  
   # Training prediction
   
-  fit.train <- ksmooth(
+  train.model <- ksmooth(
     X.train,
     Y.train,
     kernel = "normal",
@@ -1377,9 +1284,10 @@ for (i in 1:length(h.values)) {
     x.points = X.train
   )
   
+  
   # Test prediction
   
-  fit.test <- ksmooth(
+  test.model <- ksmooth(
     X.train,
     Y.train,
     kernel = "normal",
@@ -1387,82 +1295,145 @@ for (i in 1:length(h.values)) {
     x.points = X.test
   )
   
-  ksmooth.results$Training_Error[i] <-
-    mean((Y.train - fit.train$y)^2)
   
-  ksmooth.results$Test_Error[i] <-
-    mean((Y.test - fit.test$y)^2)
+  # Training MSE
+  
+  training.error[i] <- mean(
+    (Y.train - train.model$y)^2
+  )
+  
+  
+  # Test MSE
+  
+  test.error[i] <- mean(
+    (Y.test - test.model$y)^2
+  )
 }
 
 
-print(ksmooth.results)
+# Results
+
+results <- data.frame(
+  h = h.values,
+  Training_Error = training.error,
+  Test_Error = test.error
+)
+
+print(results)
+
+
+# Plot training and test errors
+
+plot(h.values,
+     training.error,
+     type = "b",
+     pch = 16,
+     xlab = "Bandwidth h",
+     ylab = "MSE",
+     main = "Training and Test Errors")
+
+lines(h.values,
+      test.error,
+      type = "b",
+      pch = 17)
+
+legend("topright",
+       legend = c("Training Error", "Test Error"),
+       pch = c(16, 17),
+       lty = 1)
 
 
 # ============================================================
-# 9. Repeat 50 Times
+# 8. Repeat 50 Times
 # ============================================================
 
 set.seed(1234)
 
 
-# 50 repetitions x 5 bandwidths x 4 kernels
-
-train.error.50 <- array(
+train.error.50 <- matrix(
   0,
-  dim = c(50, 5, 4)
+  nrow = 50,
+  ncol = length(h.values)
 )
 
-test.error.50 <- array(
+
+test.error.50 <- matrix(
   0,
-  dim = c(50, 5, 4)
+  nrow = 50,
+  ncol = length(h.values)
 )
 
 
 for (r in 1:50) {
   
-  # Random training set
-  train.id <- sample(1:100, 80)
   
-  # Remaining observations
-  test.id <- setdiff(1:100, train.id)
+  # Randomly select 80 observations
+  
+  train.id <- sample(
+    1:100,
+    80
+  )
+  
+  
+  # Remaining 20 observations
+  
+  test.id <- setdiff(
+    1:100,
+    train.id
+  )
+  
+  
+  # Training data
   
   X.train <- X[train.id]
   Y.train <- Y[train.id]
+  
+  
+  # Test data
   
   X.test <- X[test.id]
   Y.test <- Y[test.id]
   
   
-  # Four kernels
+  # Try each bandwidth
   
-  for (j in 1:4) {
+  for (i in 1:length(h.values)) {
     
-    for (i in 1:length(h.values)) {
-      
-      h <- h.values[i]
-      
-      train.pred <- kernel.smoother(
-        X.train,
-        Y.train,
-        X.train,
-        h,
-        kernels[[j]]
-      )
-      
-      test.pred <- kernel.smoother(
-        X.train,
-        Y.train,
-        X.test,
-        h,
-        kernels[[j]]
-      )
-      
-      train.error.50[r, i, j] <-
-        mean((Y.train - train.pred)^2)
-      
-      test.error.50[r, i, j] <-
-        mean((Y.test - test.pred)^2)
-    }
+    h <- h.values[i]
+    
+    
+    # Training prediction
+    
+    train.model <- ksmooth(
+      X.train,
+      Y.train,
+      kernel = "normal",
+      bandwidth = h,
+      x.points = X.train
+    )
+    
+    
+    # Test prediction
+    
+    test.model <- ksmooth(
+      X.train,
+      Y.train,
+      kernel = "normal",
+      bandwidth = h,
+      x.points = X.test
+    )
+    
+    
+    # Training error
+    
+    train.error.50[r, i] <-
+      mean((Y.train - train.model$y)^2)
+    
+    
+    # Test error
+    
+    test.error.50[r, i] <-
+      mean((Y.test - test.model$y)^2)
   }
 }
 
@@ -1471,86 +1442,49 @@ for (r in 1:50) {
 # Average errors over 50 repetitions
 # ------------------------------------------------------------
 
-average.train.error <- matrix(
-  0,
-  nrow = 5,
-  ncol = 4
-)
-
-average.test.error <- matrix(
-  0,
-  nrow = 5,
-  ncol = 4
+average.train.error <- colMeans(
+  train.error.50
 )
 
 
-for (j in 1:4) {
-  
-  average.train.error[, j] <-
-    colMeans(train.error.50[, , j])
-  
-  average.test.error[, j] <-
-    colMeans(test.error.50[, , j])
-}
+average.test.error <- colMeans(
+  test.error.50
+)
 
 
-colnames(average.train.error) <- names(kernels)
-
-colnames(average.test.error) <- names(kernels)
-
-
-# Display average errors
-
-average.training.results <- data.frame(
+average.results <- data.frame(
   h = h.values,
-  average.train.error
+  Average_Training_Error = average.train.error,
+  Average_Test_Error = average.test.error
 )
 
-average.testing.results <- data.frame(
-  h = h.values,
-  average.test.error
-)
 
-print(average.training.results)
-
-print(average.testing.results)
+print(average.results)
 
 
-# ------------------------------------------------------------
-# Plot average test errors
-# ------------------------------------------------------------
+# Plot average errors
 
 plot(h.values,
-     average.test.error[, 1],
+     average.train.error,
      type = "b",
      pch = 16,
      xlab = "Bandwidth h",
-     ylab = "Average Test MSE",
-     main = "Average Test Error - 50 Repetitions")
+     ylab = "Average MSE",
+     main = "Average Error - 50 Repetitions")
 
 lines(h.values,
-      average.test.error[, 2],
+      average.test.error,
       type = "b",
       pch = 17)
 
-lines(h.values,
-      average.test.error[, 3],
-      type = "b",
-      pch = 18)
-
-lines(h.values,
-      average.test.error[, 4],
-      type = "b",
-      pch = 15)
-
 legend("topright",
-       legend = names(kernels),
-       pch = c(16, 17, 18, 15),
+       legend = c("Training Error", "Test Error"),
+       pch = c(16, 17),
        lty = 1)
 
 
 # ============================================================
-# 10. BOSTON DATASET
+# 9. BOSTON DATASET
 # ============================================================
 
 library(MASS)
@@ -1558,10 +1492,10 @@ library(MASS)
 data(Boston)
 
 
-# X = lstat
-# Y = medv
+# Predictor and response
 
 X <- Boston$lstat
+
 Y <- Boston$medv
 
 
@@ -1571,14 +1505,21 @@ Y <- Boston$medv
 
 set.seed(1234)
 
+
 folds <- sample(
   rep(1:22, length.out = length(Y))
 )
 
 
-# Gaussian bandwidths
+# Bandwidth values
 
-h.values <- c(0.1, 0.25, 0.5, 1, 2)
+h.values <- c(
+  0.1,
+  0.25,
+  0.5,
+  1,
+  2
+)
 
 
 # Store CV errors
@@ -1596,46 +1537,73 @@ cv.error <- matrix(
 
 for (fold in 1:22) {
   
-  train.id <- which(folds != fold)
   
-  test.id <- which(folds == fold)
+  # Training observations
+  
+  train.id <- which(
+    folds != fold
+  )
+  
+  
+  # Test observations
+  
+  test.id <- which(
+    folds == fold
+  )
+  
+  
+  # Training data
   
   X.train <- X[train.id]
   Y.train <- Y[train.id]
+  
+  
+  # Test data
   
   X.test <- X[test.id]
   Y.test <- Y[test.id]
   
   
+  # Try each bandwidth
+  
   for (i in 1:length(h.values)) {
     
     h <- h.values[i]
     
-    prediction <- kernel.smoother(
+    
+    # Fit Gaussian kernel smoother
+    
+    model <- ksmooth(
       X.train,
       Y.train,
-      X.test,
-      h,
-      gaussian
+      kernel = "normal",
+      bandwidth = h,
+      x.points = X.test
     )
     
+    
+    # Calculate CV error
+    
     cv.error[fold, i] <-
-      mean((Y.test - prediction)^2)
+      mean((Y.test - model$y)^2)
   }
 }
 
 
 # ------------------------------------------------------------
-# Average CV error
+# Average CV Error
 # ------------------------------------------------------------
 
-average.cv.error <- colMeans(cv.error)
+average.cv.error <- colMeans(
+  cv.error
+)
 
 
 Boston.results <- data.frame(
   h = h.values,
   CV_Error = average.cv.error
 )
+
 
 print(Boston.results)
 
@@ -1648,21 +1616,25 @@ best.h <- h.values[
   which.min(average.cv.error)
 ]
 
-cat("Best sigma =", best.h, "\n")
+
+cat(
+  "Best bandwidth h =",
+  best.h,
+  "\n"
+)
 
 
 # ------------------------------------------------------------
-# Plot CV error
+# Plot CV errors
 # ------------------------------------------------------------
 
 plot(h.values,
      average.cv.error,
      type = "b",
      pch = 16,
-     xlab = "Sigma",
+     xlab = "Bandwidth h",
      ylab = "CV Error",
      main = "22-Fold Cross-Validation - Gaussian Kernel")
-
 
 
 
@@ -1970,3 +1942,6 @@ cat("Best df for Boston dataset =", best.df.boston, "\n")
 # ============================================================
 # END OF PROBLEM SET 7
 # ============================================================
+
+
+download.file(url="https://tinyurl.com/advcastuff",destfile="/Users/Kairi/Documents/SUJAAAAA/Adv Reg/uwu.R")
