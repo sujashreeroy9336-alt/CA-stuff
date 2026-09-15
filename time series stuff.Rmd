@@ -1,0 +1,989 @@
+---
+title: "Time Series Analysis in R — A Complete Walkthrough"
+author: "Compiled and annotated from classroom material"
+date: "`r Sys.Date()`"
+output:
+  word_document:
+    toc: true
+    toc_depth: '3'
+  html_document:
+    toc: true
+    toc_depth: 3
+    number_sections: true
+    theme: flatly
+subtitle: Yearly, Quarterly, and Monthly Case Studies (from data loading to forecast
+  evaluation)
+---
+
+```{r libraries}
+library(forecast)   # ma(), forecast(), checkresiduals(), Arima-class helpers
+library(tseries)     # adf.test()
+
+```
+# Foundations: the `ts` object
+
+* **`frequency`** — how many observations make up one natural cycle (year): `1` = yearly,
+`4` = quarterly, `12` = monthly, `52` = weekly, `7` = daily-with-weekly-cycle.
+* **`start`** — `c(period, subperiod)`, e.g. `c(1960, 1)` for "1960, quarter 1".
+
+```{r ts-basics}
+data(lynx); data(JohnsonJohnson); data(AirPassengers)
+
+yearly    <- lynx                 # already a ts, frequency 1
+quarterly <- JohnsonJohnson        # already a ts, frequency 4
+monthly   <- AirPassengers         # already a ts, frequency 12
+
+frequency(yearly); frequency(quarterly); frequency(monthly)
+start(yearly);     start(quarterly);     start(monthly)
+
+```
+```{r ts-construction-demo}
+demo_vals <- c(120,135,150,170,160,180,200,210,220,230,250,270)
+demo_monthly   <- ts(demo_vals, start = c(2024, 1), frequency = 12)
+demo_quarterly <- ts(demo_vals, start = c(2024, 1), frequency = 4)
+demo_monthly
+demo_quarterly
+
+```
+# Case Study A — Yearly data: `lynx`
+
+## Load and inspect
+
+```{r a-load}
+plot(yearly, main = "Annual Canadian Lynx Trappings (1821-1934)",
+     ylab = "Number trapped", xlab = "Year", col = "purple")
+
+```
+
+`lynx` is a famous ecological series: it does **not** trend upward or downward over time — it
+oscillates with roughly a 10-year predator-prey cycle. That fact will matter in a moment.
+
+## Deterministic trend fitting (linear, quadratic, and growth curves)
+
+The standard first move in a trend-fitting exercise is to regress the series on a simple time
+index `t = 1, 2, ..., n` and compare a straight line against a quadratic:
+
+```{r a-trend}
+n <- length(yearly)
+t <- 1:n
+
+lin.fit  <- lm(yearly ~ t)
+quad.fit <- lm(yearly ~ t + I(t^2))
+
+summary(lin.fit)
+summary(quad.fit)
+
+M <- cbind(as.numeric(yearly), fitted(lin.fit), fitted(quad.fit))
+matplot(t, M, type = "o", pch = c(16, NA, NA), lty = c(0, 1, 1),
+        col = c("black", "red", "blue"), xlab = "Year index", ylab = "Trappings",
+        main = "Lynx: linear vs. quadratic trend")
+legend("topright", c("Observed", "Linear fit", "Quadratic fit"),
+       col = c("black", "red", "blue"), lty = c(0, 1, 1), pch = c(16, NA, NA))
+
+```
+
+### The three-point (partial-sums) growth curve method
+
+Your class also covered fitting three classical S-shaped / exponential growth curves —
+**Modified Exponential**, **Gompertz**, and **Logistic** — using the **method of partial
+sums**: split the `n` observations into three equal blocks of `m = n/3`, sum each block, and
+solve the three resulting equations for the three unknown parameters. This only works cleanly
+when `n` is divisible by 3 — `lynx` has `n = 114`, so `m = 38` exactly, which is why it's a
+good teaching example.
+
+```{r a-growth-curves}
+Y <- as.numeric(yearly)
+m <- n / 3                       # 38 — divides evenly for lynx
+
+S1 <- sum(Y[1:m]); S2 <- sum(Y[(m+1):(2*m)]); S3 <- sum(Y[(2*m+1):(3*m)])
+
+## --- Method of Partial Sums Guard ---
+D1 <- S2 - S1; D2 <- S3 - S2; D <- D2 / D1
+
+if (D <= 0) {
+  warning("Partial-sum growth curve is undefined here: S1, S2, S3 are not monotonic ",
+          "(D = (S3-S2)/(S2-S1) = ", round(D, 3), " <= 0), so no real solution exists ",
+          "for C = D^(1/m). This happens because lynx is cyclical, not trending, and the ",
+          "method assumes a monotonic long-run trajectory.")
+}
+
+## --- Modified Exponential: Y = A + B*C^t ---
+C <- suppressWarnings(D^(1/m))
+B <- D1 * (C - 1) / (C * (D - 1) * (C^m - 1))
+A <- (S1/m) - (B * C * (C^m - 1)) / (m * (C - 1))
+Y_modexp <- A + B * (C^t)
+
+## --- Gompertz: Y = k * a^(b^t), fit on log(Y) ---
+logY <- log(Y)
+S1_g <- sum(logY[1:m]); S2_g <- sum(logY[(m+1):(2*m)]); S3_g <- sum(logY[(2*m+1):(3*m)])
+D1_g <- S2_g - S1_g; D2_g <- S3_g - S2_g; D_g <- D2_g / D1_g
+Cg <- suppressWarnings(D_g^(1/m))
+Bg <- D1_g * (Cg - 1) / (Cg * (D_g - 1) * (Cg^m - 1))
+Ag <- (S1_g/m) - (Bg * Cg * (Cg^m - 1)) / (m * (Cg - 1))
+k  <- exp(Ag); a_g <- exp(Bg); b_g <- Cg
+Y_gomp <- k * (a_g^(b_g^t))
+
+## --- Logistic: Y = k / (1 + exp(a + b*t)), fit on 1/Y ---
+invY <- 1 / Y
+S1_l <- sum(invY[1:m]); S2_l <- sum(invY[(m+1):(2*m)]); S3_l <- sum(invY[(2*m+1):(3*m)])
+D1_l <- S2_l - S1_l; D2_l <- S3_l - S2_l; D_l <- D2_l / D1_l
+Cl <- suppressWarnings(D_l^(1/m))
+Bl <- D1_l * (Cl - 1) / (Cl * (D_l - 1) * (Cl^m - 1))
+Al <- (S1_l/m) - (Bl * Cl * (Cl^m - 1)) / (m * (Cl - 1))
+kl <- 1 / Al; al <- log(Bl * kl); bl <- log(Cl)
+Y_logistic <- kl / (1 + exp(al + bl * t))
+
+plot(t, Y, type = "o", pch = 16,
+     ylim = range(c(Y, Y_modexp, Y_gomp, Y_logistic), na.rm = TRUE),
+     xlab = "Year index", ylab = "Trappings", main = "Growth-curve fits vs. observed")
+lines(t, Y_modexp,   col = "red",    lwd = 2, lty = 1)
+lines(t, Y_gomp,     col = "blue",   lwd = 2, lty = 2)
+lines(t, Y_logistic, col = "purple", lwd = 2, lty = 3)
+legend("topleft", c("Observed", "Modified Exp", "Gompertz", "Logistic"),
+       col = c("black", "red", "blue", "purple"), lwd = 2,
+       pch = c(16, NA, NA, NA), lty = c(NA, 1, 2, 3))
+
+MAD_MSE <- data.frame(
+  Model = c("Modified Exponential", "Gompertz", "Logistic"),
+  MAD = c(
+    mean(abs(Y - Y_modexp), na.rm = TRUE), 
+    mean(abs(Y - Y_gomp), na.rm = TRUE), 
+    mean(abs(Y - Y_logistic), na.rm = TRUE)
+  ),
+  MSE = c(
+    mean((Y - Y_modexp)^2, na.rm = TRUE), 
+    mean((Y - Y_gomp)^2, na.rm = TRUE), 
+    mean((Y - Y_logistic)^2, na.rm = TRUE)
+  )
+)
+
+```
+
+**Expert read of this result:** All three growth curves assume a *monotonic* long-run
+trajectory (only ever rising, or rising toward a ceiling). `lynx` doesn't have one — it
+cycles. Because the partial sums are not monotonically increasing or decreasing, the mathematics
+completely break down and evaluate to `NaN` (undefined). Nothing plots for the curves, and the
+MAD/MSE table returns `NaN` across the board. This is the exact right lesson to take from this
+dataset: the method literally cannot be applied to non-monotonic data. **Fit diagnostics
+(residual plots, MAD, MSE) always come before the choice of model, not after** — a smooth
+deterministic trend is the wrong tool whenever the series is stationary/cyclical rather than
+trending, which is exactly what we check for next.
+
+## Stationarity: ACF, PACF, and the ADF test
+
+```{r a-acf-pacf}
+acf(yearly,  lag.max = 40, main = "ACF of lynx")
+pacf(yearly, lag.max = 40, main = "PACF of lynx")
+
+```
+
+The ACF of a stationary-but-cyclical series shows a **damped sine-wave** pattern rather than
+either (a) slow linear decay (a sign of a trend needing differencing) or (b) an abrupt cutoff.
+The PACF for `lynx` classically shows a sharp spike around lag 2, which is the textbook
+signature of an autoregressive process of order 2 driving the ~10-year cycle.
+
+```{r a-adf}
+adf.test(log(yearly), alternative = "stationary")
+
+```
+
+We test on `log(yearly)` because lynx counts are strictly positive and multiplicatively
+variable — logging stabilises the variance before we model it 
+
+**Read the ADF test as**: null hypothesis = a unit root is present (series
+is *not* stationary); a small p-value (conventionally < 0.05) lets us reject that null and
+proceed *without* differencing. If instead you get a large p-value, difference once
+(`diff(log(yearly))`) and re-run the test before moving on — never fit `arima()` with `d`
+chosen by guesswork.
+
+## Model selection by AIC
+
+```{r a-arima-selection}
+candidates <- list(c(1,0,0), c(2,0,0), c(3,0,0), c(2,0,2))
+aic_tab <- data.frame(
+  p = sapply(candidates, `[`, 1),
+  d = sapply(candidates, `[`, 2),
+  q = sapply(candidates, `[`, 3),
+  AIC = sapply(candidates, function(ord)
+    arima(log(yearly), order = ord, include.mean = TRUE)$aic)
+)
+aic_tab[order(aic_tab$AIC), ]
+
+```
+
+Pick the row with the **lowest AIC** (not the lowest error on the training data alone — AIC
+already penalises extra parameters, which is why we compare it instead of, say, just picking
+the model with the smallest residual sum of squares). Refit that order as the final model:
+
+```{r a-final-fit}
+final.fit.a <- arima(log(yearly), order = c(2,0,0), include.mean = TRUE)
+final.fit.a
+
+```
+## Residual diagnostics
+
+A correctly specified model should leave residuals that look like white noise — no leftover
+structure for the model to have captured.
+
+```{r a-diagnostics}
+res.a <- residuals(final.fit.a)
+acf(res.a, lag.max = 40, main = "ACF of residuals — lynx AR fit")
+checkresiduals(final.fit.a, lag = 15)
+Box.test(res.a, lag = 15, fitdf = 2, type = "Ljung-Box") #`fitdf` in `Box.test()` is the number of AR + MA parameters already estimated (here `p+q = 2`) it corrects the test's degrees of freedom for the parameters you've already used up fitting the model.
+
+```
+
+ **Read the Ljung-Box test as**: null hypothesis = residuals are independent (white
+noise). A p-value comfortably above 0.05 is what you want — it means you *fail to reject* white
+noise, i.e. there's no detectable leftover autocorrelation for the model to still explain.
+
+*Note: For the classical AR(2) model on `lynx`, you will likely notice the p-value is actually below 0.05 (e.g., p ≈ 0.0185), meaning we technically reject the white noise null hypothesis. This implies AR(2) isn't fully adequate here and leaves some structure behind (an AR(3) or mixed ARMA might pass). This is common in real-world modelling and serves as a good reminder to always verify diagnostics rather than blindly trusting the classical/default textbook choice!*
+
+## Train/test split, forecasting, and RMSE
+
+```{r a-traintest}
+m.a <- floor(n * 0.80)
+train.a <- window(yearly, end = time(yearly)[m.a]) #use window for time series
+test.a  <- window(yearly, start = time(yearly)[m.a + 1])
+length(train.a); length(test.a)
+
+fit1.a <- arima(log(train.a), order = c(2,0,0), include.mean = TRUE)
+fc.a   <- forecast(fit1.a, h = length(test.a))
+
+plot(fc.a, main = "Lynx: AR(2) forecast on log scale")
+
+point_forecast.a <- exp(as.numeric(fc.a$mean))   # back-transform from log scale
+plot(as.numeric(test.a), type = "l", col = "red", lwd = 2,
+     main = "Lynx: forecast vs. actual (test set)", ylab = "Trappings", xlab = "Test period")
+lines(point_forecast.a, col = "black", lwd = 2)
+legend("topleft", c("Actual", "Forecast"), col = c("red", "black"), lwd = 2)
+
+RMSE.a <- sqrt(mean((point_forecast.a - as.numeric(test.a))^2))
+RMSE.a
+
+```
+---
+
+# Case Study B — Quarterly data: `JohnsonJohnson`
+
+## Load and inspect
+
+```{r b-load}
+plot(quarterly, main = "Johnson & Johnson Quarterly Earnings per Share (1960-1980)",
+     ylab = "EPS", xlab = "Year", col = "purple")
+
+```
+
+**multiplicative** series, which is why the very first step is a log transform.
+
+## Converting an annual trend equation to a quarterly one
+
+```{r b-annual-to-quarterly-trend}
+yr_avg <- aggregate(quarterly, nfrequency = 1, FUN = mean)
+yrs <- as.numeric(time(yr_avg))
+n.yr <- length(yrs)
+t.yr <- 1:n.yr
+
+fit.b <- lm(yr_avg ~ t.yr + I(t.yr^2))
+summary(fit.b)
+
+a.b <- coef(fit.b)[1]; b.b <- coef(fit.b)[2]; c.b <- coef(fit.b)[3]
+
+## project the annual quadratic trend down onto quarterly time points
+time.q <- 2:((4 * n.yr) + 1)
+Qt <- a.b + (b.b/4) * (time.q + 0.5) + (c.b/16) * (time.q + 0.5)^2
+
+plot(as.numeric(quarterly), type = "l", xlab = "Quarter index", ylab = "EPS",
+     main = "JJ: original series with annual trend projected to quarterly scale")
+lines(Qt, col = "red", lwd = 2)
+legend("topleft", c("Observed", "Projected trend"), col = c("black", "red"), lwd = 2)
+
+```
+
+## Classical multiplicative decomposition
+
+```{r b-decompose}
+decomp.b <- decompose(quarterly, type = "multiplicative")
+plot(decomp.b)
+decomp.b$figure    # the four quarterly seasonal indices
+
+```
+## Stationarity, differencing, and ACF/PACF
+
+```{r b-stationarity}
+logJJ <- log(quarterly)
+acf(logJJ,  lag.max = 40, main = "ACF of log(JJ) — level")
+adf.test(logJJ, alternative = "stationary")
+
+```
+
+A trending, seasonal series like this one almost always fails the ADF test at the level — the
+fix is to **difference twice**: 
+
+```{r b-differencing}
+d1  <- diff(logJJ, lag = 1)            # remove trend
+dsd <- diff(d1, lag = 4)               # remove seasonality (4 = quarterly)
+
+plot(dsd, main = "log(JJ), regular + seasonal differenced")
+acf(dsd,  lag.max = 40, main = "ACF after differencing")
+pacf(dsd, lag.max = 40, main = "PACF after differencing")
+adf.test(dsd, alternative = "stationary")
+
+```
+## Seasonal ARIMA (SARIMA) model selection
+
+Because the differenced series still has structure at both short lags (regular ARMA part) and
+the seasonal lag (seasonal ARMA part), the model needs a `seasonal = list(order = c(P,D,Q), period = 4)` component in addition to the regular `order = c(p,d,q)`:
+
+```{r b-sarima-selection}
+sarima_candidates <- list(
+  list(order = c(1,1,0), seasonal = list(order = c(0,1,1), period = 4)),
+  list(order = c(0,1,1), seasonal = list(order = c(0,1,1), period = 4)),
+  list(order = c(1,1,1), seasonal = list(order = c(1,1,0), period = 4)),
+  list(order = c(1,1,0), seasonal = list(order = c(1,1,0), period = 4))
+)
+aic_tab.b <- data.frame(
+  order    = sapply(sarima_candidates, function(s) paste(s$order, collapse = ",")),
+  seasonal = sapply(sarima_candidates, function(s) paste(s$seasonal$order, collapse = ",")),
+  AIC = sapply(sarima_candidates, function(s)
+    arima(logJJ, order = s$order, seasonal = s$seasonal)$aic)
+)
+aic_tab.b[order(aic_tab.b$AIC), ]
+
+```
+
+```{r b-final-fit}
+final.fit.b <- arima(logJJ, order = c(0,1,1), seasonal = list(order = c(0,1,1), period = 4))
+final.fit.b
+
+```
+
+*(Again — refit with whichever row actually wins the AIC comparison on your machine; the model
+above is shown as the illustrative default.)*
+
+## Residual diagnostics
+
+```{r b-diagnostics}
+res.b <- residuals(final.fit.b)
+acf(res.b, lag.max = 40, main = "ACF of SARIMA residuals — JJ")
+checkresiduals(final.fit.b, lag = 15)
+Box.test(res.b, lag = 15, fitdf = 2, type = "Ljung-Box")
+
+```
+
+## Train/test split, forecasting, and RMSE
+
+```{r b-traintest}
+n.b <- length(quarterly)
+m.b <- floor(n.b * 0.80)
+train.b <- window(logJJ, end = time(logJJ)[m.b])
+test.b  <- window(quarterly, start = time(quarterly)[m.b + 1])   # keep test on the ORIGINAL scale
+
+fit1.b <- arima(train.b, order = c(0,1,1), seasonal = list(order = c(0,1,1), period = 4))
+fc.b   <- forecast(fit1.b, h = length(test.b))
+
+plot(fc.b, main = "JJ: SARIMA forecast (log scale)")
+
+point_forecast.b <- exp(as.numeric(fc.b$mean))
+plot(as.numeric(test.b), type = "l", col = "red", lwd = 2,
+     main = "JJ: forecast vs. actual (test set)", ylab = "EPS", xlab = "Test quarter")
+lines(point_forecast.b, col = "black", lwd = 2)
+legend("topleft", c("Actual", "Forecast"), col = c("red", "black"), lwd = 2)
+
+RMSE.b <- sqrt(mean((point_forecast.b - as.numeric(test.b))^2))
+RMSE.b
+
+```
+
+---
+
+# Case Study C — Monthly data: `AirPassengers`
+
+## Load and inspect
+
+```{r c-load}
+plot(monthly, main = "AirPassengers: Monthly Totals (1949-1960)",
+     ylab = "Passengers (thousands)", xlab = "Year", col = "purple")
+
+```
+## Moving-average smoothing and manual decomposition
+
+This is the workflow your class built by hand, step by step — worth doing once manually so the
+logic behind `decompose()` isn't a black box.
+
+```{r c-ma-smoothing}
+trend.c <- ma(monthly, order = 12, centre = TRUE)   # centred 12-month moving average
+plot(monthly, main = "AirPassengers with centred 12-month moving average")
+lines(trend.c, col = "red", lwd = 2)
+
+```
+
+```{r c-detrend-deseasonalize}
+detrend.c <- monthly / trend.c                       # multiplicative: divide out the trend
+
+## average the detrended ratio within each calendar month, then re-normalise
+## so the 12 monthly indices sum to 12 (i.e. average to 1)
+unad <- tapply(detrend.c, cycle(detrend.c), FUN = mean, na.rm = TRUE)
+seasonal_index <- unad / mean(unad)
+seasonal_index
+sum(seasonal_index)      # should be (numerically) 12
+
+st.c <- ts(rep(seasonal_index, times = 12), start = start(monthly), frequency = 12)
+plot(st.c, main = "Extracted monthly seasonal index")
+
+deseasonalized.c <- monthly / st.c
+plot(deseasonalized.c, main = "AirPassengers: deseasonalized series")
+
+```
+```{r c-decompose-check}
+dec.c <- decompose(monthly, type = "multiplicative")
+plot(dec.c)
+
+```
+
+`seasonal_index` above and `dec.c$figure` should match closely (small differences can appear
+from edge handling in the moving average).
+
+## Fitting a trend, then examining what's left over
+
+```{r c-residual-trend}
+time.idx <- 1:length(monthly)
+fitted_trend.c <- lm(deseasonalized.c ~ time.idx + I(time.idx^2))
+summary(fitted_trend.c)
+
+plot(time.idx, deseasonalized.c, type = "l", xlab = "Month index", ylab = "Deseasonalized")
+lines(time.idx, predict(fitted_trend.c), col = "red", lwd = 2)
+
+remainder.c <- deseasonalized.c / predict(fitted_trend.c)
+plot(remainder.c, main = "Detrended & deseasonalized remainder", type = "l")
+
+```
+## Stationarity, differencing, ACF/PACF
+
+```{r c-stationarity}
+logAP <- log(monthly)
+acf(logAP, lag.max = 50, main = "ACF of log(AirPassengers) — level")
+adf.test(logAP, alternative = "stationary")
+
+d1.c  <- diff(logAP, lag = 1)     # remove trend
+dsd.c <- diff(d1.c, lag = 12)     # remove seasonality (12 = monthly)
+
+plot(dsd.c, main = "log(AirPassengers), regular + seasonal differenced")
+acf(dsd.c,  lag.max = 50, main = "ACF after differencing")
+pacf(dsd.c, lag.max = 50, main = "PACF after differencing")
+adf.test(dsd.c, alternative = "stationary")
+
+```
+
+## SARIMA model selection
+
+```{r c-sarima-selection}
+sarima_candidates.c <- list(
+  list(order = c(0,1,1), seasonal = list(order = c(0,1,1), period = 12)),
+  list(order = c(2,1,1), seasonal = list(order = c(0,1,1), period = 12)),
+  list(order = c(1,1,0), seasonal = list(order = c(1,1,0), period = 12)),
+  list(order = c(1,1,1), seasonal = list(order = c(1,1,1), period = 12))
+)
+aic_tab.c <- data.frame(
+  order    = sapply(sarima_candidates.c, function(s) paste(s$order, collapse = ",")),
+  seasonal = sapply(sarima_candidates.c, function(s) paste(s$seasonal$order, collapse = ",")),
+  AIC = sapply(sarima_candidates.c, function(s)
+    arima(logAP, order = s$order, seasonal = s$seasonal)$aic)
+)
+aic_tab.c[order(aic_tab.c$AIC), ]
+
+```
+
+```{r c-final-fit}
+final.fit.c <- arima(logAP, order = c(0,1,1), seasonal = list(order = c(0,1,1), period = 12))
+final.fit.c
+
+```
+## Residual diagnostics
+
+```{r c-diagnostics}
+res.c <- residuals(final.fit.c)
+acf(res.c, lag.max = 50, main = "ACF of SARIMA residuals — AirPassengers")
+checkresiduals(final.fit.c, lag = 15)
+Box.test(res.c, lag = 15, fitdf = 2, type = "Ljung-Box")
+
+```
+
+## Train/test split, forecasting, and RMSE
+
+```{r c-traintest}
+n.c <- length(monthly)
+m.c <- floor(n.c * 0.80)
+train.c <- window(logAP, end = time(logAP)[m.c])
+test.c  <- window(monthly, start = time(monthly)[m.c + 1])
+
+fit1.c <- arima(train.c, order = c(0,1,1), seasonal = list(order = c(0,1,1), period = 12))
+fc.c   <- forecast(fit1.c, h = length(test.c))
+
+plot(fc.c, main = "AirPassengers: SARIMA forecast (log scale)")
+
+point_forecast.c <- exp(as.numeric(fc.c$mean))
+plot(as.numeric(test.c), type = "l", col = "red", lwd = 2,
+     main = "AirPassengers: forecast vs. actual (test set)", ylab = "Passengers", xlab = "Test month")
+lines(point_forecast.c, col = "black", lwd = 2)
+legend("topleft", c("Actual", "Forecast"), col = c("red", "black"), lwd = 2)
+
+RMSE.c <- sqrt(mean((point_forecast.c - as.numeric(test.c))^2))
+RMSE.c
+
+```
+---
+
+# Putting it all together
+
+```{r summary-table}
+summary_tab <- data.frame(
+  Series    = c("lynx", "JohnsonJohnson", "AirPassengers"),
+  Frequency = c("Yearly (1)", "Quarterly (4)", "Monthly (12)"),
+  Transform = c("log", "log", "log"),
+  Model     = c("AR(2) on log", "SARIMA(0,1,1)(0,1,1)[4]", "SARIMA(0,1,1)(0,1,1)[12]"),
+  RMSE      = c(RMSE.a, RMSE.b, RMSE.c)
+)
+summary_tab
+
+```
+
+## Workflow cheat-sheet (applies at any frequency)
+
+1. **Load & wrap in `ts()**` with the correct `frequency` (1/4/12/...) and `start`.
+2. **Plot it.** Look for trend (rising/falling level) and seasonality (repeating wiggle).
+3. **Transform if needed.** Widening seasonal amplitude as the level rises → log transform
+(multiplicative → additive).
+4. **Deterministic trend (optional, descriptive).** `lm(x ~ t)`, `lm(x ~ t + I(t^2))`, or a
+growth curve (Modified Exponential / Gompertz / Logistic) via the method of partial sums —
+useful for describing/extrapolating a smooth trend, but only appropriate when the series
+is genuinely trending rather than stationary or cyclical.
+5. **Decompose (optional, descriptive).** `decompose(x, type = "multiplicative")`, or the
+manual moving-average route: `ma(x, order = frequency, centre = TRUE)` → detrend → average
+by `cycle()` → normalise → deseasonalize.
+6. **Test stationarity.** `adf.test()`. If it fails, difference: `diff(x, lag = 1)` for trend,
+`diff(x, lag = frequency)` for seasonality — check `acf()`/`pacf()`/`adf.test()` again after
+each step.
+7. **Select an ARIMA/SARIMA order by AIC**, comparing a handful of candidate `(p,d,q)` /
+`(P,D,Q)` combinations — never picking `d`/`D` by AIC (those are decided by the
+stationarity tests in step 6, not by AIC comparison).
+8. **Diagnose the residuals.** `checkresiduals()`, `acf(residuals(fit))`, and
+`Box.test(..., type = "Ljung-Box")` with `fitdf = p + q`. You want to *fail to reject* white
+noise.
+9. **Split with `window()**`, never by hand-slicing and re-declaring a `start()`.
+10. **Forecast, back-transform if you logged the data, and score with RMSE**
+(`sqrt(mean((forecast - actual)^2))`) against the held-out test set.
+```
+
+
+jump to 451 
+
+{
+# ============================================================
+# AR PROCESS
+# ============================================================
+
+rm(list = ls())
+
+# Read the data
+xt <- JohnsonJohnson
+
+# Check the data
+head(xt)
+str(xt)
+
+# Plot the series
+plot(xt, main = "Time Series Plot", ylab = "X", xlab = "Time")
+
+# ACF and PACF
+acf(xt, lag.max = 50, main = "ACF")
+pacf(xt, lag.max = 50, main = "PACF")
+
+# CHECKING FOR STATIONARITY
+library(tseries)
+
+# H0: Data is non-stationary
+# H1: Data is stationary
+
+adf.test(xt, alternative = "stationary")
+
+# If p-value < 0.05:
+# Reject H0
+# Therefore, the series is stationary.
+
+# FITTING ARMA(p,q) MODELS
+
+# PACF suggests AR(1)
+
+# Compare different models using AIC
+
+aic <- numeric(4)
+
+fit_12 <- arima(xt,order = c(1,0,2),include.mean = FALSE)
+aic[1] <- fit_12$aic
+fit_11 <- arima(xt,order = c(1,0,1),include.mean = FALSE)
+
+aic[2] <- fit_11$aic
+
+
+fit_10 <- arima(xt,
+                order = c(1,0,0),
+                include.mean = FALSE)
+
+aic[3] <- fit_10$aic
+
+
+fit_01 <- arima(xt,
+                order = c(0,0,1),
+                include.mean = FALSE)
+
+aic[4] <- fit_01$aic
+
+
+# Display AIC values
+p <- c(1,1,1,0)
+q <- c(2,1,0,1)
+
+model_comparison <- data.frame(
+  p = p,
+  q = q,
+  AIC = aic
+)
+
+model_comparison
+
+
+# ============================================================
+# MODEL SELECTION
+# ============================================================
+
+# Select the model having the smallest AIC
+
+# If AR(1) has the lowest AIC:
+# Final model = ARMA(1,0) = AR(1)
+
+final.fit <- arima(
+  xt,
+  order = c(1,0,0),
+  include.mean = FALSE
+)
+
+final.fit
+
+
+# ============================================================
+# GOODNESS OF FIT
+# CHECK RANDOMNESS OF RESIDUALS
+# ============================================================
+
+res <- residuals(final.fit)
+
+# ACF of residuals
+acf(res, lag.max = 50, main = "ACF of Residuals")
+
+
+library(forecast)
+
+# Residual diagnostic plots
+checkresiduals(final.fit, lag = 15)
+
+
+# Ljung-Box test
+# AR(1) has p = 1 and q = 0
+# Therefore fitdf = p + q = 1
+
+Box.test(
+  res,
+  lag = 15,
+  fitdf = 1,
+  type = "Ljung-Box"
+)
+
+# H0: Residuals are random
+# H1: Residuals are not random
+#
+# If p-value > 0.05:
+# Fail to reject H0
+# Therefore residuals are random.
+#
+# Hence, the model is adequate.
+
+
+# ============================================================
+# TRAIN-TEST SPLIT
+# ============================================================
+
+data <- xt
+
+n <- length(data)
+
+# 80% training data
+m <- ceiling(n * 0.80)
+
+tr <- data[1:m]
+te <- data[(m+1):n]
+
+# Since n = 1000:
+# Training observations = 800
+# Testing observations = 200
+
+# Original series starts at 1700 Q1
+train <- ts(
+  tr,
+  start = c(1700,1),
+  frequency = 4
+)
+
+test <- ts(
+  te,
+  start = c(1900,1),
+  frequency = 4
+)
+
+# Check
+length(train)
+length(test)
+
+start(train)
+end(train)
+
+start(test)
+end(test)
+
+
+# ============================================================
+# STATIONARITY OF TRAINING DATA
+# ============================================================
+
+adf.test(
+  train,
+  alternative = "stationary"
+)
+
+
+# ============================================================
+# FIT AR(1) MODEL ON TRAINING DATA
+# ============================================================
+
+fit1 <- arima(
+  train,
+  order = c(1,0,0),
+  include.mean = FALSE,
+  method = "ML",
+  optim.control = list(maxit = 1500)
+)
+
+fit1
+
+
+# ============================================================
+# FORECAST FOR TEST PERIOD
+# ============================================================
+
+forecast1 <- forecast(
+  fit1,
+  h = n - m
+)
+
+# Forecast plot
+plot(
+  forecast1,
+  main = "AR(1) Forecast",
+  xlab = "Time",
+  ylab = "X"
+)
+
+
+# ============================================================
+# POINT FORECASTS
+# ============================================================
+
+# Extract point forecasts
+point_forecast <- as.numeric(forecast1$mean)
+
+# Plot point forecasts
+plot(
+  point_forecast,
+  type = "l",
+  main = "Point Forecasts",
+  xlab = "Forecast Period",
+  ylab = "Forecast"
+)
+
+# Add actual test values
+lines(
+  as.numeric(test),
+  col = "red"
+)
+
+legend(
+  "topleft",
+  legend = c("Forecast", "Actual"),
+  lty = 1,
+  col = c("black", "red")
+)
+
+
+# ============================================================
+# FORECAST ACCURACY - RMSE
+# ============================================================
+
+RMSE1 <- sqrt(
+  mean(
+    (point_forecast - as.numeric(test))^2
+  )
+)
+
+RMSE1
+
+
+# ============================================================
+# RESIDUAL DIAGNOSTICS FOR TRAINING MODEL
+# ============================================================
+
+res1 <- residuals(fit1)
+
+# ACF of residuals
+acf(
+  res1,
+  lag.max = 50,
+  main = "ACF of Training Residuals"
+)
+
+# Residual diagnostic plots
+checkresiduals(
+  fit1,
+  lag = 15
+)
+
+# Ljung-Box test
+Box.test(
+  res1,
+  lag = 15,
+  fitdf = 1,
+  type = "Ljung-Box"
+)
+
+# If p-value > 0.05:
+# Residuals are random
+# Therefore AR(1) is an adequate model.
+Here is the transcription of your notes in normal text format:
+
+**Practical 9/9/26**
+
+MA(q) in terms of characteristic polynomial.
+AR(p) in terms of characteristic polynomial.
+AR(1) with α = 1 is non-stationary.
+AR(1) with first difference is stationary.
+
+**ARMA (p,q):** Auto Reg and MA process.
+Xt = α1 Xt-1 + α2 Xt-2 + ... + αp Xt-p + εt + β1 εt-1 + β2 εt-2 + ... + βq εt-q
+
+where εt ~ WN(0, σ²).
+
+For q = 0, we get AR(p) process.
+For p = 0, we get MA(q) process.
+
+**In characteristic polynomials:**
+(1 - Bα1 - B²α2 - ... - B^p αp) Xt = (1 + β1 B + β2 B² + ... + βq B^q) εt
+i.e., Ψ(B) Xt = Θ(B) εt
+
+So, ACF and PACF will be asymptotic to the x-axis.
+
+**Problem with real life data** is it is difficult to identify whether ACF and PACF is zero beyond some value or they are decaying slowly.
+
+---
+
+**Model Selection Criteria**
+
+A) **AIC:** Akaike's info criteria.
+AIC = -2 log(likelihood) + 2(p + q + 1)
+
+B) **AICC:** Bias-corrected AIC.
+AICC = -2 log(likelihood) + [2(p + q + 1) n] / (n - p - q - 2)
+
+Compare the values of AIC of different models and choose the one with least AIC.
+
+---
+
+**Checking for Stationarity**
+
+Let Model 1 have 10 parameters with AIC 2857. Model 2 has 2 parameters with AIC 2851. We will choose Model 2 because much simpler → **Parsimonious model**.
+
+**Dickey-Fuller Test:**
+To test whether a series has unit root.
+
+**AR(1):** Xt = α Xt-1 + εt. To check if α = 1 (non-stationary).
+If yes, the series is non-stationary.
+→ **Problem:** α = 1 implies Ψ(z) = 0 implies z = 1 (unit root).
+
+---
+
+**Given a data:**
+- extract the non-stationary data part (Tt, St) → ...
+- Given the residuals are random, we can conclude we have taken out all the assignable parts.
+- Check randomness of residuals by:
+  1. ACF
+  2. Portmanteau test
+  3. Ljung-Box test
+
+Let the ACF of the residuals be rk(h). If the residuals are random, rk(h) ≈ 0.
+
+*(Diagram: A plot with bounds lines, with dots oscillating around zero between the bounds.)*
+
+**For Portmanteau test:**
+Statistic Q = n Σ (from h=1 to m) rk²(h) ~ χ²m
+where n = # obs, m = prefixed value.
+
+**For Ljung-Box test:**
+Q = n(n+2) Σ (from h=1 to m) [rk²(h) / (n-h)] ~ χ²m
+
+In either case, reject the randomness of errors if observed Q > χ²(m, α).
+
+---
+
+**To test:**
+H0: α = 1 (non stationary) vs H1: α < 1 (stationary)
+
+**Write** ΔXt = Xt - Xt-1
+= (α Xt-1 - Xt-1) + εt
+= (α - 1) Xt-1 + εt
+= α* Xt-1 + εt
+
+**Test:**
+H0: α* = 0 (non stat) vs H1: α* < 0 (stat)
+
+**Estimation:**
+α̂* = [ Σ (from t=2 to n) ΔXt Xt-1 ] / [ Σ (from t=2 to n) X²t-1 ]
+
+se(α̂*) = σ̂ [ Σ (from t=2 to n) (Xt-1 - X̄)² ]^(-1/2)
+
+**Std error:**
+σ̂ = Σ (from t=2 to n) ( ΔXt - α̂* Xt-1 )²
+
+**Test statistic:**
+t = α̂* / se(α̂*)
+
+**Critical point:** Fuller (1976) table.
+
+---
+
+**Augmented Dickey-Fuller test**
+
+**AR(p):** Ψ(z) = 0 implies may have a problem.
+
+ΔXt = Xt - Xt-1
+= (α1 - 1) Xt-1 + α2 Xt-2 + ... + αp Xt-p + εt
+= (α1 + α2 + ... + αp - 1) Xt-1 - (α2 + ... + αp)(Xt-1 - Xt-2)
+  - (α3 + ... + αp)(Xt-2 - Xt-3) - ... - αp (Xt-p+1 - Xt-p) + εt
+= α* Xt-1 + α1* ΔXt-1 + α2* ΔXt-2 + ... + αp* ΔXt-p + εt
+
+Suppose there is only one unit root. Except Xt-1, all other terms in the model are first differenced. Hence, if there is a first order non-stationarity, it is caused by Xt-1, so the other differenced terms will be stationary.
+
+Hence, we use test for coefficient of Xt-1.
+H0: α* = 0 (n.s) vs H1: α* < 0
+→ order of differencing d ≥ 1.
+
+Ψ(z) = 0 can have more than one unit root.
+Test on Δ²Xt, Δ³Xt, ... so on till you achieve stationarity.
+→ Thus ADF test helps to find order of differencing.
